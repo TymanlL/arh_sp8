@@ -1,0 +1,7 @@
+fastapi==0.95.0
+uvicorn==0.21.1
+pyjwt==2.6.0
+cryptography==40.0.1
+python-jose==3.3.0
+python-multipart==0.0.6
+httpx==0.24.0
