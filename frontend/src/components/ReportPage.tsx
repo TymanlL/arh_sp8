@@ -14,7 +14,7 @@ const ReportPage: React.FC = () => {
       const hasRole = keycloak.hasRealmRole('prothetic_user');
       setHasReportAccess(hasRole);
     }
-  }, [initialized, keycloak.authenticated, keycloak]);
+  }, [initialized, keycloak]);
 
   const downloadReport = async () => {
     if (!keycloak?.token) {
@@ -34,9 +34,9 @@ const ReportPage: React.FC = () => {
 
       if (!response.ok) {
         if (response.status === 401) {
-          setError('Нет доступа к отчетам. Требуется роль prothetic_user.');
+          setError('Ошибка аутентификации. Пожалуйста, войдите снова.');
         } else if (response.status === 403) {
-          setError('Доступ запрещен. Недостаточно прав.');
+          setError('Доступ запрещен. У вас нет роли prothetic_user.');
         } else {
           setError(`Ошибка сервера: ${response.status}`);
         }
@@ -76,10 +76,7 @@ const ReportPage: React.FC = () => {
     return (
       <div className="flex flex-col items-center justify-center min-h-screen bg-gray-100">
         <button
-          onClick={() => {
-            // Используем параметры PKCE при входе
-            keycloak.login();
-          }}
+          onClick={() => keycloak.login()}
           className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
         >
           Войти

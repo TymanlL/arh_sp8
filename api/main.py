@@ -1,12 +1,12 @@
-from fastapi import FastAPI, Depends, HTTPException, status
-from fastapi.security import OAuth2AuthorizationCodeBearer
+from fastapi import FastAPI, Depends, HTTPException, status, Request
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 import jwt
-from jwt import PyJWKClient
-import os
+from jwt.jwk import PyJWK
+import requests
+import json
 from datetime import datetime, timedelta
 import random
-import json
 from typing import Dict, List, Any, Optional
 
 app = FastAPI(title="BionicPRO Reports API")
@@ -20,29 +20,90 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Настройка OAuth2
-oauth2_scheme = OAuth2AuthorizationCodeBearer(
-    authorizationUrl=f"http://localhost:8080/realms/reports-realm/protocol/openid-connect/auth",
-    tokenUrl=f"http://localhost:8080/realms/reports-realm/protocol/openid-connect/token"
-)
+# Схема для получения Bearer токена
+security = HTTPBearer()
 
-# URL для получения публичных ключей для проверки JWT
-JWKS_URL = "http://localhost:8080/realms/reports-realm/protocol/openid-connect/certs"
-jwks_client = PyJWKClient(JWKS_URL)
+# URL для получения публичных ключей Keycloak
+KEYCLOAK_URL = "http://keycloak:8080"
+REALM = "reports-realm"
+JWKS_URL = f"{KEYCLOAK_URL}/realms/{REALM}/protocol/openid-connect/certs"
 
-# Функция для проверки JWT токена и извлечения информации о пользователе
-async def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any]:
+# Кеш для публичных ключей
+jwks_cache = None
+jwks_cache_time = None
+
+def get_jwks():
+    """Получение и кеширование публичных ключей Keycloak"""
+    global jwks_cache, jwks_cache_time
+    
+    # Если кеш устарел или отсутствует, обновляем его
+    if jwks_cache is None or jwks_cache_time is None or (datetime.now() - jwks_cache_time).total_seconds() > 3600:
+        try:
+            response = requests.get(JWKS_URL)
+            response.raise_for_status()
+            jwks_cache = response.json()
+            jwks_cache_time = datetime.now()
+        except Exception as e:
+            # Если не удалось получить ключи с Keycloak, пробуем публичный URL
+            try:
+                public_url = f"http://localhost:8080/realms/{REALM}/protocol/openid-connect/certs"
+                response = requests.get(public_url)
+                response.raise_for_status()
+                jwks_cache = response.json()
+                jwks_cache_time = datetime.now()
+            except Exception as e2:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=f"Could not fetch JWKS: {str(e2)}"
+                )
+    
+    return jwks_cache
+
+def get_signing_key(token):
+    """Получение ключа для проверки подписи токена"""
+    jwks = get_jwks()
+    
+    # Получаем заголовок токена без проверки подписи
+    try:
+        header = jwt.get_unverified_header(token)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Invalid token header: {str(e)}"
+        )
+    
+    # Ищем ключ с соответствующим kid
+    kid = header.get('kid')
+    if not kid:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has no 'kid' header"
+        )
+    
+    # Находим соответствующий ключ в JWKS
+    for key in jwks.get('keys', []):
+        if key.get('kid') == kid:
+            return PyJWK(key)
+    
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=f"No matching key found for kid: {kid}"
+    )
+
+async def validate_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """Валидация JWT токена"""
+    token = credentials.credentials
+    
     try:
         # Получаем ключ для проверки подписи
-        signing_key = jwks_client.get_signing_key_from_jwt(token)
+        signing_key = get_signing_key(token)
         
         # Проверяем токен
         payload = jwt.decode(
             token,
             signing_key.key,
             algorithms=["RS256"],
-            audience="reports-frontend",  # Должен соответствовать clientId
-            options={"verify_signature": True, "verify_aud": False, "verify_exp": True}
+            options={"verify_aud": False}  # Отключаем проверку audience
         )
         
         # Проверяем наличие обязательных полей
@@ -59,7 +120,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token has expired"
         )
-    except jwt.JWTError as e:
+    except jwt.InvalidTokenError as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Invalid token: {str(e)}"
@@ -70,9 +131,9 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any
             detail=f"Error validating token: {str(e)}"
         )
 
-# Проверка наличия роли prothetic_user
-def check_prothetic_user_role(user: Dict[str, Any]) -> Dict[str, Any]:
-    realm_access = user.get("realm_access", {})
+def check_prothetic_user_role(payload: Dict[str, Any]):
+    """Проверка наличия роли prothetic_user"""
+    realm_access = payload.get("realm_access", {})
     roles = realm_access.get("roles", [])
     
     if "prothetic_user" not in roles:
@@ -81,11 +142,10 @@ def check_prothetic_user_role(user: Dict[str, Any]) -> Dict[str, Any]:
             detail="Access denied: You need the 'prothetic_user' role to access this resource"
         )
     
-    return user
+    return payload
 
-# Генерация данных для отчета
-def generate_report_data(user_id: str) -> Dict[str, Any]:
-    # Получаем текущую дату
+def generate_report_data(user_id: str):
+    """Генерация данных отчета"""
     now = datetime.now()
     
     # Генерируем данные за последние 30 дней
@@ -140,10 +200,13 @@ def read_root():
     return {"message": "BionicPRO Reports API"}
 
 @app.get("/reports")
-async def get_report(current_user: Dict[str, Any] = Depends(check_prothetic_user_role)):
+async def get_report(payload: Dict[str, Any] = Depends(validate_token)):
+    # Проверяем роль prothetic_user
+    check_prothetic_user_role(payload)
+    
     # Получаем ID пользователя из JWT токена
-    user_id = current_user.get("sub")
-    username = current_user.get("preferred_username", "unknown")
+    user_id = payload.get("sub")
+    username = payload.get("preferred_username", "unknown")
     
     # Генерируем отчет на основе ID пользователя
     report_data = generate_report_data(user_id)

@@ -117,8 +117,7 @@
       "redirectUris": ["http://localhost:3000/*"],
       "webOrigins": ["http://localhost:3000"],
       "directAccessGrantsEnabled": true,
-      "standardFlowEnabled": true,
-      "pkceCodeChallengeMethod": "S256"
+      "standardFlowEnabled": true
     },
     {
       "clientId": "reports-api",
